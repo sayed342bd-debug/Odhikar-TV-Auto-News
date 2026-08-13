@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>অধিকার টিভি অটো নিউজ</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: Arial, sans-serif;
+      background: #f5f5f5;
+      color: #222;
+    }
+
+    header {
+      background: #b40000;
+      color: white;
+      padding: 18px 20px;
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: 26px;
+    }
+
+    header p {
+      margin-top: 6px;
+      font-size: 14px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 30px auto;
+      padding: 0 15px;
+    }
+
+    .card {
+      background: white;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 3px 15px rgba(0,0,0,0.08);
+    }
+
+    .card h2 {
+      margin-bottom: 10px;
+    }
+
+    .card p {
+      line-height: 1.7;
+      color: #555;
+    }
+
+    .status {
+      margin-top: 20px;
+      padding: 15px;
+      background: #f1f1f1;
+      border-radius: 8px;
+    }
+
+    .login-btn {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 12px 20px;
+      background: #b40000;
+      color: white;
+      text-decoration: none;
+      border-radius: 7px;
+    }
+
+    .login-btn:hover {
+      background: #8d0000;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <h1>অধিকার টিভি অটো নিউজ</h1>
+    <p>স্বয়ংক্রিয় নিউজ সংগ্রহ ও প্রকাশনা প্ল্যাটফর্ম</p>
+  </header>
+
+  <div class="container">
+
+    <div class="card">
+      <h2>Odhikar TV Auto News</h2>
+
+      <p>
+        এই প্ল্যাটফর্মের মাধ্যমে বিভিন্ন নিউজ সোর্স থেকে তথ্য সংগ্রহ,
+        যাচাই, সম্পাদনা এবং Blogger-এ স্বয়ংক্রিয়ভাবে প্রকাশ করার ব্যবস্থা
+        তৈরি করা হবে।
+      </p>
+
+      <div class="status">
+        <strong>System Status:</strong>
+        <span>Project is being configured...</span>
+      </div>
+
+      <a
+        class="login-btn"
+        href="/api/auth/google/login"
+      >
+        Connect Blogger
+      </a>
+    </div>
+
+  </div>
+
+</body>
+</html>
