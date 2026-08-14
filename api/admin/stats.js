@@ -10,7 +10,10 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ==========================================
     // Get all news drafts
+    // ==========================================
+
     const scanResponse = await redisCommand(
       redisUrl,
       redisToken,
@@ -52,6 +55,10 @@ export default async function handler(req, res) {
 
     const news = [];
 
+    // ==========================================
+    // Read each draft
+    // ==========================================
+
     for (const key of keys) {
       const response = await redisCommand(
         redisUrl,
@@ -59,7 +66,7 @@ export default async function handler(req, res) {
         ["GET", key]
       );
 
-      if (!response.result) {
+      if (response.error || !response.result) {
         continue;
       }
 
@@ -85,7 +92,10 @@ export default async function handler(req, res) {
       }
     }
 
+    // ==========================================
     // Statistics
+    // ==========================================
+
     const total = news.length;
 
     const published = news.filter(
@@ -100,7 +110,10 @@ export default async function handler(req, res) {
       item => item.status === "review"
     ).length;
 
+    // ==========================================
     // Newest first
+    // ==========================================
+
     news.sort((a, b) => {
       const dateA = new Date(
         a.created_at || 0
@@ -112,6 +125,10 @@ export default async function handler(req, res) {
 
       return dateB - dateA;
     });
+
+    // ==========================================
+    // Final response
+    // ==========================================
 
     return res.status(200).json({
       success: true,
@@ -163,7 +180,16 @@ async function redisCommand(
       };
     }
 
-    const data = JSON.parse(text);
+    let data;
+
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return {
+        result: null,
+        error: "Invalid Redis response."
+      };
+    }
 
     return {
       result: data[0]?.result ?? null,
@@ -176,4 +202,4 @@ async function redisCommand(
       error: error.message
     };
   }
-      }
+}
