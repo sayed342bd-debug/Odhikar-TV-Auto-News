@@ -73,7 +73,7 @@ export default async function handler(req, res) {
 Category অবশ্যই এইগুলোর একটি হবে:
 জাতীয়, আন্তর্জাতিক, খেলাধুলা, বিনোদন, প্রযুক্তি, অর্থনীতি, অন্যান্য
 
-শুধু JSON object ফেরত দাও।
+শুধু একটি JSON object ফেরত দাও।
 
 Format:
 {
@@ -102,7 +102,7 @@ Source URL: ${news.link}
             model: "gemini-flash-lite-latest",
             input: prompt,
             response_format: {
-              type: "json_object"
+              type: "object"
             }
           })
         }
@@ -133,7 +133,6 @@ Source URL: ${news.link}
         continue;
       }
 
-      // Interactions API output
       let generatedText = "";
 
       if (geminiData.output_text) {
@@ -310,4 +309,4 @@ function hashString(text) {
   }
 
   return Math.abs(hash).toString();
-          }
+}
