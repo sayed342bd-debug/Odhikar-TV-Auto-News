@@ -11,7 +11,7 @@ export default async function handler(req, res) {
 
   try {
     // ==========================================
-    // 1. Get Google OAuth tokens from Redis
+    // 1. Get Google OAuth tokens
     // ==========================================
 
     const tokenResponse = await redisCommand(
@@ -41,10 +41,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // ==========================================
-    // 2. Get access token
-    // ==========================================
-
     let accessToken = tokenData.access_token;
 
     if (!accessToken) {
@@ -55,31 +51,31 @@ export default async function handler(req, res) {
     }
 
     // ==========================================
-    // 3. Get Blogger Blog ID
+    // 2. Find Blogger Blog ID
     // ==========================================
 
     const blogUrl = "https://odhikartv01.blogspot.com/";
 
-    let blogResponse = await fetch(
+    let blogResponse = await bloggerRequest(
       `https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(
         blogUrl
       )}&fetchUserInfo=false`,
       {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
-        }
+        method: "GET",
+        accessToken
       }
     );
 
     // ==========================================
-    // 4. Refresh token if access token expired
+    // 3. Refresh token if expired
     // ==========================================
 
     if (blogResponse.status === 401) {
       if (!tokenData.refresh_token) {
         return res.status(401).json({
           success: false,
-          error: "Google access token expired and no refresh token is available. Please reconnect Blogger."
+          error:
+            "Google access token expired and no refresh token is available. Please reconnect Blogger."
         });
       }
 
@@ -114,14 +110,11 @@ export default async function handler(req, res) {
       if (!refreshResponse.ok || !refreshData.access_token) {
         return res.status(401).json({
           success: false,
-          error: "Unable to refresh Google access token.",
-          details: refreshData
+          error: "Unable to refresh Google access token."
         });
       }
 
       accessToken = refreshData.access_token;
-
-      // Save refreshed access token
       tokenData.access_token = accessToken;
 
       await redisCommand(
@@ -134,26 +127,24 @@ export default async function handler(req, res) {
         ]
       );
 
-      // Retry Blogger request
-      blogResponse = await fetch(
+      blogResponse = await bloggerRequest(
         `https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(
           blogUrl
         )}&fetchUserInfo=false`,
         {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
-          }
+          method: "GET",
+          accessToken
         }
       );
     }
 
     if (!blogResponse.ok) {
-      const blogError = await blogResponse.text();
+      const errorText = await blogResponse.text();
 
       return res.status(500).json({
         success: false,
         error: "Unable to access Blogger blog.",
-        details: blogError
+        details: errorText
       });
     }
 
@@ -168,7 +159,7 @@ export default async function handler(req, res) {
     }
 
     // ==========================================
-    // 5. Find draft keys
+    // 4. Find drafts
     // ==========================================
 
     const scanResponse = await redisCommand(
@@ -207,10 +198,10 @@ export default async function handler(req, res) {
     const results = [];
 
     // ==========================================
-    // 6. Publish drafts
+    // 5. Publish maximum 2 drafts per run
     // ==========================================
 
-    for (const draftKey of draftKeys.slice(0, 5)) {
+    for (const draftKey of draftKeys.slice(0, 2)) {
       const draftResponse = await redisCommand(
         redisUrl,
         redisToken,
@@ -242,7 +233,6 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Skip already published drafts
       if (draft.status === "published") {
         results.push({
           draft_key: draftKey,
@@ -262,12 +252,14 @@ export default async function handler(req, res) {
       }
 
       // ==========================================
-      // 7. Create Blogger HTML content
+      // 6. Build Blogger HTML
       // ==========================================
 
-      const safeTitle = escapeHtml(draft.title);
       const safeSummary = escapeHtml(draft.summary);
-      const safeSource = escapeHtml(draft.source || "সংবাদ সূত্র");
+      const safeSource = escapeHtml(
+        draft.source || "সংবাদ সূত্র"
+      );
+
       const safeSourceUrl = escapeAttribute(
         draft.source_url || ""
       );
@@ -303,49 +295,34 @@ export default async function handler(req, res) {
 `;
 
       // ==========================================
-      // 8. Publish to Blogger
+      // 7. Publish with retry
       // ==========================================
 
-      const publishResponse = await fetch(
-        `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
+      const publishResult = await publishWithRetry(
+        blogId,
+        accessToken,
         {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            kind: "blogger#post",
-            title: draft.title,
-            content: content,
-            labels: [draft.category || "অন্যান্য"]
-          })
+          title: draft.title,
+          content,
+          labels: [draft.category || "অন্যান্য"]
         }
       );
 
-      const publishText = await publishResponse.text();
-
-      if (!publishResponse.ok) {
+      if (!publishResult.success) {
         results.push({
           draft_key: draftKey,
           title: draft.title,
           status: "publish_error",
-          error: publishText
+          error: publishResult.error
         });
 
         continue;
       }
 
-      let publishedPost;
-
-      try {
-        publishedPost = JSON.parse(publishText);
-      } catch {
-        publishedPost = {};
-      }
+      const publishedPost = publishResult.post;
 
       // ==========================================
-      // 9. Mark draft as published
+      // 8. Mark as published
       // ==========================================
 
       const updatedDraft = {
@@ -375,6 +352,12 @@ export default async function handler(req, res) {
         category: draft.category,
         blogger_url: publishedPost.url || null
       });
+
+      // ==========================================
+      // 9. Wait before next post
+      // ==========================================
+
+      await sleep(5000);
     }
 
     return res.status(200).json({
@@ -397,10 +380,117 @@ export default async function handler(req, res) {
 
 
 // ==========================================
+// Blogger request helper
+// ==========================================
+
+async function bloggerRequest(url, options = {}) {
+  return fetch(url, {
+    method: options.method || "GET",
+    headers: {
+      Authorization: `Bearer ${options.accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: options.body
+  });
+}
+
+
+// ==========================================
+// Publish with 429 retry
+// ==========================================
+
+async function publishWithRetry(
+  blogId,
+  accessToken,
+  postData
+) {
+  const maxAttempts = 4;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(
+      `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          kind: "blogger#post",
+          title: postData.title,
+          content: postData.content,
+          labels: postData.labels
+        })
+      }
+    );
+
+    const text = await response.text();
+
+    if (response.ok) {
+      try {
+        return {
+          success: true,
+          post: JSON.parse(text)
+        };
+      } catch {
+        return {
+          success: false,
+          error: "Blogger returned an invalid response."
+        };
+      }
+    }
+
+    // Rate limit
+    if (response.status === 429) {
+      if (attempt === maxAttempts) {
+        return {
+          success: false,
+          error:
+            "Blogger API rate limit reached after multiple retries."
+        };
+      }
+
+      // Increasing delay:
+      // 8s → 16s → 32s
+      const delay =
+        Math.pow(2, attempt) * 8000;
+
+      await sleep(delay);
+
+      continue;
+    }
+
+    return {
+      success: false,
+      error: text
+    };
+  }
+
+  return {
+    success: false,
+    error: "Publishing failed."
+  };
+}
+
+
+// ==========================================
+// Sleep helper
+// ==========================================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+// ==========================================
 // Redis REST command
 // ==========================================
 
-async function redisCommand(url, token, command) {
+async function redisCommand(
+  url,
+  token,
+  command
+) {
   const response = await fetch(
     `${url}/pipeline`,
     {
@@ -436,7 +526,7 @@ function escapeHtml(value) {
 
 
 // ==========================================
-// HTML attribute escaping
+// Attribute escaping
 // ==========================================
 
 function escapeAttribute(value) {
@@ -445,4 +535,4 @@ function escapeAttribute(value) {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-          }
+  }
