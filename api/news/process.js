@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
   const redisUrl = process.env.KV_REST_API_URL;
   const redisToken = process.env.KV_REST_API_TOKEN;
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
 
   if (!redisUrl || !redisToken) {
     return res.status(500).json({
@@ -10,15 +10,14 @@ export default async function handler(req, res) {
     });
   }
 
-  if (!openaiKey) {
+  if (!geminiKey) {
     return res.status(500).json({
       success: false,
-      error: "OPENAI_API_KEY is missing."
+      error: "GEMINI_API_KEY is missing."
     });
   }
 
   try {
-    // 1. Get latest news
     const newsResponse = await fetch(
       "https://odhikar-tv-auto-news.vercel.app/api/news/fetch"
     );
@@ -42,12 +41,10 @@ export default async function handler(req, res) {
 
     const results = [];
 
-    // Process latest 5 news first
     for (const news of newsData.news.slice(0, 5)) {
       const duplicateKey =
         "news:processed:" + hashString(news.title);
 
-      // 2. Check duplicate
       const checkResponse = await redisCommand(
         redisUrl,
         redisToken,
@@ -63,100 +60,92 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // 3. AI processing
-      const aiResponse = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${openaiKey}`
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            temperature: 0.2,
-            response_format: {
-              type: "json_object"
-            },
-            messages: [
-              {
-                role: "system",
-                content: `
+      const prompt = `
 তুমি ODHIKAR TV-এর News Editor।
 
-প্রদত্ত খবরের তথ্য ব্যবহার করে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত বাংলা নিউজ তৈরি করবে।
+নিচের খবরের তথ্য ব্যবহার করে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত বাংলা নিউজ তৈরি করো।
 
 কোনো তথ্য বানাবে না।
 মূল প্রতিবেদনের লেখা কপি করবে না।
-নিশ্চিত নয় এমন তথ্যকে সত্য হিসেবে লিখবে না।
 অভিযোগকে প্রমাণিত সত্য হিসেবে লিখবে না।
-সহিংসতা, উগ্রবাদ, গুজব বা সন্দেহজনক দাবির ক্ষেত্রে সতর্ক থাকবে।
+নিশ্চিত নয় এমন তথ্যকে সত্য হিসেবে লিখবে না।
 
 Category অবশ্যই এইগুলোর একটি হবে:
 জাতীয়, আন্তর্জাতিক, খেলাধুলা, বিনোদন, প্রযুক্তি, অর্থনীতি, অন্যান্য
 
-JSON format:
+শুধু নিচের JSON format-এ উত্তর দাও:
 
 {
-  "title": "সংবাদ শিরোনাম",
+  "title": "নতুন বাংলা শিরোনাম",
   "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
   "category": "জাতীয়"
 }
 
-শুধু JSON ফেরত দাও।
-`
-              },
+মূল খবর:
+Title: ${news.title}
+Source: ${news.source}
+Published: ${news.pubDate}
+Source URL: ${news.link}
+`;
+
+      const geminiResponse = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            contents: [
               {
-                role: "user",
-                content: JSON.stringify({
-                  title: news.title,
-                  source: news.source,
-                  published_at: news.pubDate,
-                  source_url: news.link
-                })
+                parts: [
+                  {
+                    text: prompt
+                  }
+                ]
               }
-            ]
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              responseMimeType: "application/json"
+            }
           })
         }
       );
 
-      // Read OpenAI response safely
-      const aiText = await aiResponse.text();
+      const geminiText = await geminiResponse.text();
 
-      if (!aiResponse.ok) {
+      if (!geminiResponse.ok) {
         results.push({
           title: news.title,
           status: "ai_error",
-          error: aiText
+          error: geminiText
         });
 
         continue;
       }
 
-      let aiData;
+      let geminiData;
 
       try {
-        aiData = JSON.parse(aiText);
+        geminiData = JSON.parse(geminiText);
       } catch {
         results.push({
           title: news.title,
-          status: "invalid_openai_response",
-          error: aiText
+          status: "invalid_gemini_response"
         });
 
         continue;
       }
 
-      // Check OpenAI response structure
-      if (
-        !aiData.choices ||
-        !aiData.choices[0] ||
-        !aiData.choices[0].message
-      ) {
+      const generatedText =
+        geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!generatedText) {
         results.push({
           title: news.title,
-          status: "invalid_openai_response",
-          error: aiData
+          status: "empty_ai_response",
+          error: geminiData
         });
 
         continue;
@@ -165,19 +154,17 @@ JSON format:
       let article;
 
       try {
-        article = JSON.parse(
-          aiData.choices[0].message.content
-        );
+        article = JSON.parse(generatedText);
       } catch {
         results.push({
           title: news.title,
-          status: "invalid_ai_json"
+          status: "invalid_ai_json",
+          response: generatedText
         });
 
         continue;
       }
 
-      // 4. Safety gate
       if (
         !article.title ||
         !article.summary ||
@@ -191,7 +178,6 @@ JSON format:
         continue;
       }
 
-      // 5. Save as processed
       await redisCommand(
         redisUrl,
         redisToken,
@@ -204,7 +190,6 @@ JSON format:
         ]
       );
 
-      // 6. Save generated article as draft
       const articleKey =
         "news:draft:" + hashString(news.title);
 
@@ -241,7 +226,7 @@ JSON format:
 
     return res.status(200).json({
       success: true,
-      message: "News processing completed.",
+      message: "Gemini news processing completed.",
       processed: results.length,
       results
     });
@@ -256,7 +241,6 @@ JSON format:
 }
 
 
-// Upstash Redis REST command helper
 async function redisCommand(url, token, command) {
   const response = await fetch(
     `${url}/pipeline`,
@@ -278,7 +262,6 @@ async function redisCommand(url, token, command) {
 }
 
 
-// Simple stable hash for duplicate detection
 function hashString(text) {
   let hash = 0;
 
