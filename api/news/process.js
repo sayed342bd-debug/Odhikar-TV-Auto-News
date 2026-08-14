@@ -95,6 +95,14 @@ export default async function handler(req, res) {
 Category অবশ্যই এইগুলোর একটি হবে:
 জাতীয়, আন্তর্জাতিক, খেলাধুলা, বিনোদন, প্রযুক্তি, অর্থনীতি, অন্যান্য
 
+JSON format:
+
+{
+  "title": "সংবাদ শিরোনাম",
+  "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
+  "category": "জাতীয়"
+}
+
 শুধু JSON ফেরত দাও।
 `
               },
@@ -112,12 +120,43 @@ Category অবশ্যই এইগুলোর একটি হবে:
         }
       );
 
-      const aiData = await aiResponse.json();
+      // Read OpenAI response safely
+      const aiText = await aiResponse.text();
 
       if (!aiResponse.ok) {
         results.push({
           title: news.title,
-          status: "ai_error"
+          status: "ai_error",
+          error: aiText
+        });
+
+        continue;
+      }
+
+      let aiData;
+
+      try {
+        aiData = JSON.parse(aiText);
+      } catch {
+        results.push({
+          title: news.title,
+          status: "invalid_openai_response",
+          error: aiText
+        });
+
+        continue;
+      }
+
+      // Check OpenAI response structure
+      if (
+        !aiData.choices ||
+        !aiData.choices[0] ||
+        !aiData.choices[0].message
+      ) {
+        results.push({
+          title: news.title,
+          status: "invalid_openai_response",
+          error: aiData
         });
 
         continue;
@@ -132,7 +171,7 @@ Category অবশ্যই এইগুলোর একটি হবে:
       } catch {
         results.push({
           title: news.title,
-          status: "invalid_ai_response"
+          status: "invalid_ai_json"
         });
 
         continue;
@@ -165,7 +204,7 @@ Category অবশ্যই এইগুলোর একটি হবে:
         ]
       );
 
-      // 6. Save generated article
+      // 6. Save generated article as draft
       const articleKey =
         "news:draft:" + hashString(news.title);
 
@@ -210,7 +249,8 @@ Category অবশ্যই এইগুলোর একটি হবে:
   } catch (error) {
     return res.status(500).json({
       success: false,
-      error: "News processing failed."
+      error: "News processing failed.",
+      details: error.message
     });
   }
 }
@@ -252,4 +292,4 @@ function hashString(text) {
   }
 
   return Math.abs(hash).toString();
-        }
+}
