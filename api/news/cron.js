@@ -1,5 +1,8 @@
 export default async function handler(req, res) {
-  // Vercel Cron request verification
+  // ==========================================
+  // 1. Verify Vercel Cron request
+  // ==========================================
+
   const cronSecret = process.env.CRON_SECRET;
 
   if (cronSecret) {
@@ -13,15 +16,36 @@ export default async function handler(req, res) {
     }
   }
 
+  // Only allow GET requests
+  if (req.method !== "GET") {
+    return res.status(405).json({
+      success: false,
+      error: "Method not allowed."
+    });
+  }
+
+  // ==========================================
+  // 2. Application URL
+  // ==========================================
+
+  const baseUrl =
+    process.env.NEWS_APP_URL ||
+    "https://odhikar-tv-auto-news.vercel.app";
+
   try {
     // ==========================================
-    // 1. Process latest news with Gemini
+    // 3. Process latest news with Gemini
     // ==========================================
 
     const processResponse = await fetch(
-      "https://odhikar-tv-auto-news.vercel.app/api/news/process",
+      `${baseUrl}/api/news/process`,
       {
-        method: "GET"
+        method: "GET",
+        headers: cronSecret
+          ? {
+              Authorization: `Bearer ${cronSecret}`
+            }
+          : {}
       }
     );
 
@@ -35,7 +59,7 @@ export default async function handler(req, res) {
       return res.status(500).json({
         success: false,
         error: "News processing returned invalid response.",
-        details: processText
+        details: processText.slice(0, 2000)
       });
     }
 
@@ -43,18 +67,23 @@ export default async function handler(req, res) {
       return res.status(500).json({
         success: false,
         error: "News processing failed.",
-        process: processData
+        processing: processData
       });
     }
 
     // ==========================================
-    // 2. Publish generated drafts to Blogger
+    // 4. Publish generated drafts to Blogger
     // ==========================================
 
     const publishResponse = await fetch(
-      "https://odhikar-tv-auto-news.vercel.app/api/news/publish",
+      `${baseUrl}/api/news/publish`,
       {
-        method: "GET"
+        method: "GET",
+        headers: cronSecret
+          ? {
+              Authorization: `Bearer ${cronSecret}`
+            }
+          : {}
       }
     );
 
@@ -68,7 +97,7 @@ export default async function handler(req, res) {
       return res.status(500).json({
         success: false,
         error: "Blogger publishing returned invalid response.",
-        details: publishText
+        details: publishText.slice(0, 2000)
       });
     }
 
@@ -76,33 +105,49 @@ export default async function handler(req, res) {
       return res.status(500).json({
         success: false,
         error: "Blogger publishing failed.",
-        publish: publishData
+        publishing: publishData
       });
     }
 
     // ==========================================
-    // 3. Final result
+    // 5. Final result
     // ==========================================
 
     return res.status(200).json({
       success: true,
       message: "Auto news cron completed successfully.",
+
       processing: {
-        success: processData.success,
-        processed: processData.processed || 0
+        success: processData.success === true,
+        processed: Number(processData.processed || 0),
+        draft_created: Number(
+          processData.draft_created || 0
+        ),
+        duplicates: Number(
+          processData.duplicates || 0
+        ),
+        safety_reviews: Number(
+          processData.safety_reviews || 0
+        )
       },
+
       publishing: {
-        success: publishData.success,
-        published: publishData.published || 0
+        success: publishData.success === true,
+        published: Number(
+          publishData.published || 0
+        )
       },
-      results: publishData.results || []
+
+      results: Array.isArray(publishData.results)
+        ? publishData.results
+        : []
     });
 
   } catch (error) {
     return res.status(500).json({
       success: false,
       error: "Cron job failed.",
-      details: error.message
+      details: error?.message || "Unknown error."
     });
   }
 }
