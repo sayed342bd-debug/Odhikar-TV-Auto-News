@@ -12,10 +12,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Get saved Google OAuth token from Redis
     const redisResponse = await fetch(
       `${redisUrl}/get/odhikar_tv_google_tokens`,
       {
+        method: "GET",
         headers: {
           Authorization: `Bearer ${redisToken}`
         }
@@ -23,16 +23,35 @@ export default async function handler(req, res) {
     );
 
     const redisData = await redisResponse.json();
-    const tokenData = redisData.result;
+
+    if (!redisResponse.ok) {
+      return res.status(500).json({
+        success: false,
+        error: "Could not read token from Redis."
+      });
+    }
+
+    let tokenData = redisData.result;
+
+    // Redis may return the stored JSON as a string
+    if (typeof tokenData === "string") {
+      try {
+        tokenData = JSON.parse(tokenData);
+      } catch {
+        return res.status(500).json({
+          success: false,
+          error: "Saved token data is not valid JSON."
+        });
+      }
+    }
 
     if (!tokenData || !tokenData.access_token) {
       return res.status(401).json({
         success: false,
-        error: "Google access token not found."
+        error: "Saved Google access token is missing."
       });
     }
 
-    // Create test post
     const postResponse = await fetch(
       `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/`,
       {
@@ -44,11 +63,10 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           kind: "blogger#post",
           title: "Odhikar TV Auto News — Test Post",
-          content: `
-            <h2>Odhikar TV Auto News</h2>
-            <p>এটি আমাদের Auto News System-এর প্রথম পরীক্ষামূলক পোস্ট।</p>
-            <p>Google Blogger API সফলভাবে কাজ করছে।</p>
-          `
+          content:
+            "<h2>Odhikar TV Auto News</h2>" +
+            "<p>এটি আমাদের Auto News System-এর প্রথম পরীক্ষামূলক পোস্ট।</p>" +
+            "<p>Google Blogger API সফলভাবে কাজ করছে।</p>"
         })
       }
     );
