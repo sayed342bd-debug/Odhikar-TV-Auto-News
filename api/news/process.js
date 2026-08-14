@@ -73,8 +73,9 @@ export default async function handler(req, res) {
 Category অবশ্যই এইগুলোর একটি হবে:
 জাতীয়, আন্তর্জাতিক, খেলাধুলা, বিনোদন, প্রযুক্তি, অর্থনীতি, অন্যান্য
 
-শুধু নিচের JSON format-এ উত্তর দাও:
+শুধু JSON object ফেরত দাও।
 
+Format:
 {
   "title": "নতুন বাংলা শিরোনাম",
   "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
@@ -88,27 +89,20 @@ Published: ${news.pubDate}
 Source URL: ${news.link}
 `;
 
-      // Gemini AI
+      // Gemini Interactions API
       const geminiResponse = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${geminiKey}`,
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
         {
           method: "POST",
           headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": geminiKey
           },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: prompt
-                  }
-                ]
-              }
-            ],
-            generationConfig: {
-              temperature: 0.2,
-              responseMimeType: "application/json"
+            model: "gemini-flash-lite-latest",
+            input: prompt,
+            response_format: {
+              type: "json_object"
             }
           })
         }
@@ -139,14 +133,49 @@ Source URL: ${news.link}
         continue;
       }
 
-      const generatedText =
-        geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+      // Interactions API output
+      let generatedText = "";
+
+      if (geminiData.output_text) {
+        generatedText = geminiData.output_text;
+      }
+
+      if (!generatedText && Array.isArray(geminiData.outputs)) {
+        for (const output of geminiData.outputs) {
+          if (
+            output?.type === "text" &&
+            typeof output?.text === "string"
+          ) {
+            generatedText += output.text;
+          }
+        }
+      }
+
+      if (!generatedText && Array.isArray(geminiData.steps)) {
+        for (const step of geminiData.steps) {
+          if (step?.type !== "model_output") {
+            continue;
+          }
+
+          if (!Array.isArray(step.content)) {
+            continue;
+          }
+
+          for (const content of step.content) {
+            if (
+              content?.type === "text" &&
+              typeof content?.text === "string"
+            ) {
+              generatedText += content.text;
+            }
+          }
+        }
+      }
 
       if (!generatedText) {
         results.push({
           title: news.title,
-          status: "empty_ai_response",
-          error: geminiData
+          status: "empty_ai_response"
         });
 
         continue;
@@ -230,7 +259,7 @@ Source URL: ${news.link}
 
     return res.status(200).json({
       success: true,
-      message: "Gemini news processing completed.",
+      message: "Gemini Interactions news processing completed.",
       processed: results.length,
       results
     });
@@ -281,4 +310,4 @@ function hashString(text) {
   }
 
   return Math.abs(hash).toString();
-}
+          }
