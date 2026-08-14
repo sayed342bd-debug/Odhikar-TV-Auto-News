@@ -88,8 +88,9 @@ Published: ${news.pubDate}
 Source URL: ${news.link}
 `;
 
+      // Gemini AI
       const geminiResponse = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${geminiKey}`,
         {
           method: "POST",
           headers: {
@@ -165,6 +166,7 @@ Source URL: ${news.link}
         continue;
       }
 
+      // Safety check
       if (
         !article.title ||
         !article.summary ||
@@ -178,6 +180,7 @@ Source URL: ${news.link}
         continue;
       }
 
+      // Mark as processed
       await redisCommand(
         redisUrl,
         redisToken,
@@ -190,6 +193,7 @@ Source URL: ${news.link}
         ]
       );
 
+      // Save draft
       const articleKey =
         "news:draft:" + hashString(news.title);
 
@@ -241,6 +245,7 @@ Source URL: ${news.link}
 }
 
 
+// Upstash Redis REST command
 async function redisCommand(url, token, command) {
   const response = await fetch(
     `${url}/pipeline`,
@@ -262,6 +267,7 @@ async function redisCommand(url, token, command) {
 }
 
 
+// Duplicate detection hash
 function hashString(text) {
   let hash = 0;
 
