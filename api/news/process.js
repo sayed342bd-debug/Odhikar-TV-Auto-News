@@ -18,6 +18,7 @@ export default async function handler(req, res) {
   }
 
   try {
+    // 1. Fetch latest news
     const newsResponse = await fetch(
       "https://odhikar-tv-auto-news.vercel.app/api/news/fetch"
     );
@@ -41,10 +42,12 @@ export default async function handler(req, res) {
 
     const results = [];
 
+    // Process latest 5 news
     for (const news of newsData.news.slice(0, 5)) {
       const duplicateKey =
         "news:processed:" + hashString(news.title);
 
+      // 2. Duplicate check
       const checkResponse = await redisCommand(
         redisUrl,
         redisToken,
@@ -60,27 +63,31 @@ export default async function handler(req, res) {
         continue;
       }
 
+      // 3. AI prompt
       const prompt = `
 তুমি ODHIKAR TV-এর News Editor।
 
-নিচের খবরের তথ্য ব্যবহার করে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত বাংলা নিউজ তৈরি করো।
+নিচের সংবাদ তথ্যের ভিত্তিতে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত বাংলা নিউজ তৈরি করো।
 
-কোনো তথ্য বানাবে না।
-মূল প্রতিবেদনের লেখা কপি করবে না।
-অভিযোগকে প্রমাণিত সত্য হিসেবে লিখবে না।
-নিশ্চিত নয় এমন তথ্যকে সত্য হিসেবে লিখবে না।
+নিয়ম:
+- কোনো তথ্য বানাবে না।
+- মূল প্রতিবেদনের বাক্য হুবহু কপি করবে না।
+- শুধুমাত্র দেওয়া তথ্যের ভিত্তিতে লিখবে।
+- অভিযোগকে প্রমাণিত সত্য হিসেবে লিখবে না।
+- নিশ্চিত নয় এমন তথ্যকে নিশ্চিত হিসেবে লিখবে না।
+- সংবাদের ভাষা নিরপেক্ষ ও পেশাদার হবে।
+- অতিরঞ্জিত বা ক্লিকবেইট শিরোনাম লিখবে না।
 
-Category অবশ্যই এইগুলোর একটি হবে:
-জাতীয়, আন্তর্জাতিক, খেলাধুলা, বিনোদন, প্রযুক্তি, অর্থনীতি, অন্যান্য
+Category অবশ্যই নিচের একটি হতে হবে:
+জাতীয়
+আন্তর্জাতিক
+খেলাধুলা
+বিনোদন
+প্রযুক্তি
+অর্থনীতি
+অন্যান্য
 
-শুধু একটি JSON object ফেরত দাও।
-
-Format:
-{
-  "title": "নতুন বাংলা শিরোনাম",
-  "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
-  "category": "জাতীয়"
-}
+শুধু JSON format-এ উত্তর দাও।
 
 মূল খবর:
 Title: ${news.title}
@@ -89,7 +96,7 @@ Published: ${news.pubDate}
 Source URL: ${news.link}
 `;
 
-      // Gemini Interactions API
+      // 4. Gemini Interactions API
       const geminiResponse = await fetch(
         "https://generativelanguage.googleapis.com/v1beta/interactions",
         {
@@ -100,9 +107,40 @@ Source URL: ${news.link}
           },
           body: JSON.stringify({
             model: "gemini-flash-lite-latest",
+
             input: prompt,
+
             response_format: {
-              type: "object"
+              type: "text",
+              mime_type: "application/json",
+              schema: {
+                type: "object",
+                properties: {
+                  title: {
+                    type: "string"
+                  },
+                  summary: {
+                    type: "string"
+                  },
+                  category: {
+                    type: "string",
+                    enum: [
+                      "জাতীয়",
+                      "আন্তর্জাতিক",
+                      "খেলাধুলা",
+                      "বিনোদন",
+                      "প্রযুক্তি",
+                      "অর্থনীতি",
+                      "অন্যান্য"
+                    ]
+                  }
+                },
+                required: [
+                  "title",
+                  "summary",
+                  "category"
+                ]
+              }
             }
           })
         }
@@ -110,6 +148,7 @@ Source URL: ${news.link}
 
       const geminiText = await geminiResponse.text();
 
+      // 5. Gemini API error
       if (!geminiResponse.ok) {
         results.push({
           title: news.title,
@@ -120,6 +159,7 @@ Source URL: ${news.link}
         continue;
       }
 
+      // 6. Parse Gemini response
       let geminiData;
 
       try {
@@ -127,18 +167,25 @@ Source URL: ${news.link}
       } catch {
         results.push({
           title: news.title,
-          status: "invalid_gemini_response"
+          status: "invalid_gemini_response",
+          response: geminiText
         });
 
         continue;
       }
 
+      // 7. Get generated text
       let generatedText = "";
 
-      if (geminiData.output_text) {
-        generatedText = geminiData.output_text;
+      // Normal Interactions API output
+      if (
+        typeof geminiData.output_text === "string" &&
+        geminiData.output_text.trim()
+      ) {
+        generatedText = geminiData.output_text.trim();
       }
 
+      // Fallback: outputs
       if (!generatedText && Array.isArray(geminiData.outputs)) {
         for (const output of geminiData.outputs) {
           if (
@@ -150,6 +197,7 @@ Source URL: ${news.link}
         }
       }
 
+      // Fallback: steps
       if (!generatedText && Array.isArray(geminiData.steps)) {
         for (const step of geminiData.steps) {
           if (step?.type !== "model_output") {
@@ -180,6 +228,7 @@ Source URL: ${news.link}
         continue;
       }
 
+      // 8. Parse generated JSON
       let article;
 
       try {
@@ -194,21 +243,48 @@ Source URL: ${news.link}
         continue;
       }
 
-      // Safety check
+      // 9. Validate article
       if (
-        !article.title ||
-        !article.summary ||
-        !article.category
+        typeof article !== "object" ||
+        !article ||
+        typeof article.title !== "string" ||
+        !article.title.trim() ||
+        typeof article.summary !== "string" ||
+        !article.summary.trim() ||
+        typeof article.category !== "string" ||
+        !article.category.trim()
       ) {
         results.push({
           title: news.title,
-          status: "safety_review_required"
+          status: "safety_review_required",
+          article: article
         });
 
         continue;
       }
 
-      // Mark as processed
+      // 10. Validate category
+      const allowedCategories = [
+        "জাতীয়",
+        "আন্তর্জাতিক",
+        "খেলাধুলা",
+        "বিনোদন",
+        "প্রযুক্তি",
+        "অর্থনীতি",
+        "অন্যান্য"
+      ];
+
+      if (!allowedCategories.includes(article.category)) {
+        results.push({
+          title: news.title,
+          status: "invalid_category",
+          category: article.category
+        });
+
+        continue;
+      }
+
+      // 11. Mark as processed
       await redisCommand(
         redisUrl,
         redisToken,
@@ -221,13 +297,14 @@ Source URL: ${news.link}
         ]
       );
 
-      // Save draft
+      // 12. Create draft key
       const articleKey =
         "news:draft:" + hashString(news.title);
 
+      // 13. Create draft
       const draft = {
-        title: article.title,
-        summary: article.summary,
+        title: article.title.trim(),
+        summary: article.summary.trim(),
         category: article.category,
         source: news.source,
         source_url: news.link,
@@ -236,6 +313,7 @@ Source URL: ${news.link}
         created_at: new Date().toISOString()
       };
 
+      // 14. Save draft to Redis
       await redisCommand(
         redisUrl,
         redisToken,
@@ -248,6 +326,7 @@ Source URL: ${news.link}
         ]
       );
 
+      // 15. Success
       results.push({
         title: news.title,
         status: "draft_created",
@@ -258,7 +337,7 @@ Source URL: ${news.link}
 
     return res.status(200).json({
       success: true,
-      message: "Gemini Interactions news processing completed.",
+      message: "Gemini news processing completed.",
       processed: results.length,
       results
     });
@@ -273,7 +352,10 @@ Source URL: ${news.link}
 }
 
 
-// Upstash Redis REST command
+// ==========================================
+// Upstash Redis REST command helper
+// ==========================================
+
 async function redisCommand(url, token, command) {
   const response = await fetch(
     `${url}/pipeline`,
@@ -295,7 +377,10 @@ async function redisCommand(url, token, command) {
 }
 
 
-// Duplicate detection hash
+// ==========================================
+// Stable hash for duplicate detection
+// ==========================================
+
 function hashString(text) {
   let hash = 0;
 
@@ -309,4 +394,4 @@ function hashString(text) {
   }
 
   return Math.abs(hash).toString();
-}
+        }
