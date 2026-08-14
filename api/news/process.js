@@ -642,4 +642,4 @@ function hashString(text) {
   }
 
   return Math.abs(hash).toString();
-}
+    }
