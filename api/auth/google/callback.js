@@ -11,13 +11,23 @@ export default async function handler(req, res) {
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const redirectUri = process.env.GOOGLE_REDIRECT_URI;
 
-  if (!clientId || !clientSecret || !redirectUri) {
+  const redisUrl = process.env.KV_REST_API_URL;
+  const redisToken = process.env.KV_REST_API_TOKEN;
+
+  if (
+    !clientId ||
+    !clientSecret ||
+    !redirectUri ||
+    !redisUrl ||
+    !redisToken
+  ) {
     return res.status(500).json({
-      error: "Google OAuth environment variables are missing."
+      error: "Required environment variables are missing."
     });
   }
 
   try {
+    // Exchange authorization code for Google tokens
     const tokenResponse = await fetch(
       "https://oauth2.googleapis.com/token",
       {
@@ -39,21 +49,40 @@ export default async function handler(req, res) {
 
     if (!tokenResponse.ok) {
       return res.status(400).json({
-        error: "Google OAuth token exchange failed.",
-        details: tokenData
+        error: "Google OAuth token exchange failed."
       });
     }
 
-    res.status(200).json({
+    // Save the token data in Upstash Redis
+    const redisResponse = await fetch(
+      `${redisUrl}/set/odhikar_tv_google_tokens`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${redisToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(tokenData)
+      }
+    );
+
+    if (!redisResponse.ok) {
+      const redisError = await redisResponse.text();
+
+      return res.status(500).json({
+        error: "Failed to save Google tokens."
+      });
+    }
+
+    return res.status(200).json({
       success: true,
-      message: "Google Blogger connected successfully.",
-      token_received: true
+      message: "Google Blogger connected and token saved successfully.",
+      token_saved: true
     });
 
   } catch (error) {
-    res.status(500).json({
-      error: "OAuth callback failed.",
-      details: error.message
+    return res.status(500).json({
+      error: "OAuth callback failed."
     });
   }
 }
