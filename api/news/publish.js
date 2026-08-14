@@ -22,7 +22,7 @@ export default async function handler(req, res) {
 
   try {
     // ==========================================
-    // 2. Get saved Google OAuth tokens
+    // 2. Get Google OAuth tokens
     // ==========================================
 
     const tokenResponse = await redisCommand(
@@ -87,7 +87,7 @@ export default async function handler(req, res) {
     );
 
     // ==========================================
-    // 4. Refresh Google access token if expired
+    // 4. Refresh access token if expired
     // ==========================================
 
     if (blogResponse.status === 401) {
@@ -139,7 +139,7 @@ export default async function handler(req, res) {
     }
 
     // ==========================================
-    // 5. Get ALL draft keys
+    // 5. Scan ALL news:draft:* keys
     // ==========================================
 
     const draftKeysResult = await scanAllDraftKeys(
@@ -161,26 +161,25 @@ export default async function handler(req, res) {
       return res.status(200).json({
         success: true,
         message: "No news drafts found.",
+        scanned_drafts: 0,
+        selected_for_publish: 0,
         published: 0,
         skipped: 0,
+        publish_errors: 0,
+        waiting_drafts: 0,
         results: []
       });
     }
 
     // ==========================================
-    // 6. Load drafts and find publishable drafts
+    // 6. Load ALL drafts
     // ==========================================
 
-    const publishableDrafts = [];
+    const allDrafts = [];
     const results = [];
     let skipped = 0;
 
     for (const draftKey of draftKeys) {
-      // Stop collecting once we have enough to publish.
-      if (publishableDrafts.length >= 2) {
-        break;
-      }
-
       const draftResponse = await redisCommand(
         redisUrl,
         redisToken,
@@ -241,10 +240,13 @@ export default async function handler(req, res) {
       }
 
       // ------------------------------------------
-      // Only publish actual drafts
+      // Only draft status is publishable
       // ------------------------------------------
 
-      if (draft.status && draft.status !== "draft") {
+      if (
+        draft.status &&
+        draft.status !== "draft"
+      ) {
         results.push({
           draft_key: draftKey,
           title: draft.title || "",
@@ -257,7 +259,7 @@ export default async function handler(req, res) {
       }
 
       // ------------------------------------------
-      // Validate content
+      // Validate draft content
       // ------------------------------------------
 
       if (
@@ -276,29 +278,88 @@ export default async function handler(req, res) {
         continue;
       }
 
-      publishableDrafts.push({
+      allDrafts.push({
         key: draftKey,
         draft
       });
     }
 
     // ==========================================
-    // 7. Publish selected drafts
+    // 7. Sort by oldest created_at first
+    // ==========================================
+
+    allDrafts.sort((a, b) => {
+      const dateA = getDraftTime(a.draft);
+      const dateB = getDraftTime(b.draft);
+
+      return dateA - dateB;
+    });
+
+    // ==========================================
+    // 8. Publish limit
+    // ==========================================
+
+    // প্রতি cron run-এ সর্বোচ্চ ৫টি নিউজ।
+    const PUBLISH_LIMIT = 5;
+
+    const publishableDrafts = allDrafts.slice(
+      0,
+      PUBLISH_LIMIT
+    );
+
+    // ==========================================
+    // 9. No publishable drafts
+    // ==========================================
+
+    if (publishableDrafts.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No publishable news drafts found.",
+
+        scanned_drafts:
+          draftKeys.length,
+
+        selected_for_publish: 0,
+
+        published: 0,
+
+        skipped,
+
+        publish_errors: 0,
+
+        waiting_drafts: 0,
+
+        results
+      });
+    }
+
+    // ==========================================
+    // 10. Publish selected drafts
     // ==========================================
 
     for (const item of publishableDrafts) {
-      const { key: draftKey, draft } = item;
+      const draftKey = item.key;
+      const draft = item.draft;
 
-      const safeTitle = escapeHtml(draft.title.trim());
-      const safeSummary = escapeHtml(draft.summary.trim());
+      const safeTitle =
+        escapeHtml(draft.title.trim());
 
-      const safeSource = escapeHtml(
-        draft.source || "সংবাদ সূত্র"
-      );
+      const safeSummary =
+        escapeHtml(draft.summary.trim());
 
-      const sourceUrl = sanitizeUrl(
-        draft.source_url || ""
-      );
+      const safeSource =
+        escapeHtml(
+          draft.source || "সংবাদ সূত্র"
+        );
+
+      const sourceUrl =
+        sanitizeUrl(
+          draft.source_url || ""
+        );
+
+      // ------------------------------------------
+      // Build Blogger HTML
+      // ------------------------------------------
 
       const content = `
 <div>
@@ -316,9 +377,11 @@ export default async function handler(req, res) {
       ? `
   <p>
     <strong>মূল সংবাদ:</strong>
-    <a href="${escapeAttribute(sourceUrl)}"
-       target="_blank"
-       rel="noopener noreferrer">
+    <a
+      href="${escapeAttribute(sourceUrl)}"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
       মূল প্রতিবেদন দেখুন
     </a>
   </p>
@@ -333,52 +396,69 @@ export default async function handler(req, res) {
 `;
 
       // ==========================================
-      // 8. Publish to Blogger
+      // 11. Publish to Blogger
       // ==========================================
 
-      let publishResult = await publishWithRetry(
-        blogId,
-        accessToken,
-        {
-          title: draft.title.trim(),
-          content,
-          labels: [draft.category || "অন্যান্য"]
-        }
-      );
+      let publishResult =
+        await publishWithRetry(
+          blogId,
+          accessToken,
+          {
+            title:
+              draft.title.trim(),
+
+            content,
+
+            labels: [
+              draft.category ||
+                "অন্যান্য"
+            ]
+          }
+        );
 
       // ==========================================
-      // 9. If Google token expired during publish,
-      //    refresh and retry once
+      // 12. Refresh token if needed
       // ==========================================
 
       if (
         !publishResult.success &&
         publishResult.status === 401
       ) {
-        const refreshed = await refreshGoogleToken(
-          redisUrl,
-          redisToken,
-          tokenData
-        );
+        const refreshed =
+          await refreshGoogleToken(
+            redisUrl,
+            redisToken,
+            tokenData
+          );
 
         if (refreshed.success) {
-          accessToken = refreshed.accessToken;
-          tokenData = refreshed.tokenData;
+          accessToken =
+            refreshed.accessToken;
 
-          publishResult = await publishWithRetry(
-            blogId,
-            accessToken,
-            {
-              title: draft.title.trim(),
-              content,
-              labels: [draft.category || "অন্যান্য"]
-            }
-          );
+          tokenData =
+            refreshed.tokenData;
+
+          publishResult =
+            await publishWithRetry(
+              blogId,
+              accessToken,
+              {
+                title:
+                  draft.title.trim(),
+
+                content,
+
+                labels: [
+                  draft.category ||
+                    "অন্যান্য"
+                ]
+              }
+            );
         }
       }
 
       // ==========================================
-      // 10. Publishing failed
+      // 13. Publishing failed
       // ==========================================
 
       if (!publishResult.success) {
@@ -389,13 +469,16 @@ export default async function handler(req, res) {
           error: publishResult.error
         });
 
+        // এই draft আটকে থাকবে।
+        // পরের cron run-এ আবার চেষ্টা করবে।
         continue;
       }
 
-      const publishedPost = publishResult.post || {};
+      const publishedPost =
+        publishResult.post || {};
 
       // ==========================================
-      // 11. Mark draft as published
+      // 14. Mark draft as published
       // ==========================================
 
       const updatedDraft = {
@@ -416,74 +499,110 @@ export default async function handler(req, res) {
           new Date().toISOString()
       };
 
-      const updateResponse = await redisCommand(
-        redisUrl,
-        redisToken,
-        [
-          "SET",
-          draftKey,
-          JSON.stringify(updatedDraft),
-          "EX",
-          "2592000"
-        ]
-      );
+      const updateResponse =
+        await redisCommand(
+          redisUrl,
+          redisToken,
+          [
+            "SET",
+            draftKey,
+            JSON.stringify(
+              updatedDraft
+            ),
+            "EX",
+            "2592000"
+          ]
+        );
 
       if (updateResponse.error) {
         results.push({
           draft_key: draftKey,
           title: draft.title,
-          status: "published_but_redis_update_failed",
-          blogger_url: publishedPost.url || null,
-          error: updateResponse.error
+          status:
+            "published_but_redis_update_failed",
+          blogger_url:
+            publishedPost.url || null,
+          error:
+            updateResponse.error
         });
 
         continue;
       }
 
       // ==========================================
-      // 12. Success
+      // 15. Success
       // ==========================================
 
       results.push({
         draft_key: draftKey,
+
         title: draft.title,
-        category: draft.category || "অন্যান্য",
+
+        category:
+          draft.category ||
+          "অন্যান্য",
+
         status: "published",
+
         blogger_post_id:
           publishedPost.id || null,
+
         blogger_url:
           publishedPost.url || null
       });
 
-      // Small delay between posts.
+      // ------------------------------------------
+      // Delay between Blogger posts
+      // ------------------------------------------
+
       await sleep(5000);
     }
 
     // ==========================================
-    // 13. Final response
+    // 16. Final response
     // ==========================================
+
+    const publishedCount =
+      results.filter(
+        item =>
+          item.status === "published"
+      ).length;
+
+    const publishErrorCount =
+      results.filter(
+        item =>
+          item.status === "publish_error"
+      ).length;
 
     return res.status(200).json({
       success: true,
-      message: "Blogger auto publishing completed.",
 
-      scanned_drafts: draftKeys.length,
+      message:
+        "Blogger auto publishing completed.",
+
+      scanned_drafts:
+        draftKeys.length,
+
+      total_publishable_drafts:
+        allDrafts.length,
 
       selected_for_publish:
         publishableDrafts.length,
 
       published:
-        results.filter(
-          item => item.status === "published"
-        ).length,
+        publishedCount,
 
       skipped,
 
       publish_errors:
-        results.filter(
-          item =>
-            item.status === "publish_error"
-        ).length,
+        publishErrorCount,
+
+      waiting_drafts:
+        Math.max(
+          0,
+          allDrafts.length -
+            publishableDrafts.length
+        ),
 
       results
     });
@@ -491,9 +610,13 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(500).json({
       success: false,
-      error: "Blogger publishing failed.",
+
+      error:
+        "Blogger publishing failed.",
+
       details:
-        error?.message || "Unknown error."
+        error?.message ||
+        "Unknown error."
     });
   }
 }
@@ -531,26 +654,36 @@ async function refreshGoogleToken(
       };
     }
 
-    const response = await fetch(
-      "https://oauth2.googleapis.com/token",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/x-www-form-urlencoded"
-        },
-        body: new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-          refresh_token:
-            tokenData.refresh_token,
-          grant_type:
-            "refresh_token"
-        })
-      }
-    );
+    const response =
+      await fetch(
+        "https://oauth2.googleapis.com/token",
+        {
+          method: "POST",
 
-    const data = await response.json();
+          headers: {
+            "Content-Type":
+              "application/x-www-form-urlencoded"
+          },
+
+          body:
+            new URLSearchParams({
+              client_id:
+                clientId,
+
+              client_secret:
+                clientSecret,
+
+              refresh_token:
+                tokenData.refresh_token,
+
+              grant_type:
+                "refresh_token"
+            })
+        }
+      );
+
+    const data =
+      await response.json();
 
     if (
       !response.ok ||
@@ -565,6 +698,7 @@ async function refreshGoogleToken(
 
     const updatedTokenData = {
       ...tokenData,
+
       access_token:
         data.access_token
     };
@@ -597,8 +731,10 @@ async function refreshGoogleToken(
 
     return {
       success: true,
+
       accessToken:
         data.access_token,
+
       tokenData:
         updatedTokenData
     };
@@ -606,6 +742,7 @@ async function refreshGoogleToken(
   } catch (error) {
     return {
       success: false,
+
       error:
         error?.message ||
         "Google token refresh failed."
@@ -622,7 +759,7 @@ async function bloggerRequest(
   url,
   options = {}
 ) {
-  return fetch(url, {
+  const fetchOptions = {
     method:
       options.method || "GET",
 
@@ -632,11 +769,18 @@ async function bloggerRequest(
 
       "Content-Type":
         "application/json"
-    },
+    }
+  };
 
-    body:
-      options.body
-  });
+  if (options.body !== undefined) {
+    fetchOptions.body =
+      options.body;
+  }
+
+  return fetch(
+    url,
+    fetchOptions
+  );
 }
 
 
@@ -671,18 +815,20 @@ async function publishWithRetry(
                 "application/json"
             },
 
-            body: JSON.stringify({
-              kind: "blogger#post",
+            body:
+              JSON.stringify({
+                kind:
+                  "blogger#post",
 
-              title:
-                postData.title,
+                title:
+                  postData.title,
 
-              content:
-                postData.content,
+                content:
+                  postData.content,
 
-              labels:
-                postData.labels
-            })
+                labels:
+                  postData.labels
+              })
           }
         );
 
@@ -697,12 +843,14 @@ async function publishWithRetry(
         try {
           return {
             success: true,
+
             post:
               JSON.parse(text)
           };
         } catch {
           return {
             success: false,
+
             error:
               "Blogger returned an invalid response."
           };
@@ -713,22 +861,29 @@ async function publishWithRetry(
       // Unauthorized
       // ----------------------------------------
 
-      if (response.status === 401) {
+      if (
+        response.status === 401
+      ) {
         return {
           success: false,
+
           status: 401,
+
           error:
             "Google access token expired or is unauthorized."
         };
       }
 
       // ----------------------------------------
-      // Rate limit
+      // Rate limit / temporary error
       // ----------------------------------------
 
       if (
         response.status === 429 ||
-        response.status === 503
+        response.status === 500 ||
+        response.status === 502 ||
+        response.status === 503 ||
+        response.status === 504
       ) {
         if (
           attempt ===
@@ -736,10 +891,12 @@ async function publishWithRetry(
         ) {
           return {
             success: false,
+
             status:
               response.status,
+
             error:
-              "Blogger rate limit/service unavailable after multiple retries."
+              "Blogger service/rate limit error after multiple retries."
           };
         }
 
@@ -783,8 +940,10 @@ async function publishWithRetry(
 
       return {
         success: false,
+
         status:
           response.status,
+
         error:
           text.slice(
             0,
@@ -799,6 +958,7 @@ async function publishWithRetry(
       ) {
         return {
           success: false,
+
           error:
             error?.message ||
             "Blogger request failed."
@@ -806,16 +966,20 @@ async function publishWithRetry(
       }
 
       await sleep(
-        Math.pow(
-          2,
-          attempt
-        ) * 3000
+        Math.min(
+          Math.pow(
+            2,
+            attempt
+          ) * 3000,
+          30000
+        )
       );
     }
   }
 
   return {
     success: false,
+
     error:
       "Publishing failed."
   };
@@ -862,20 +1026,14 @@ async function scanAllDraftKeys(
         response.result;
 
       if (
-        !Array.isArray(
-          result
-        ) ||
-        !Array.isArray(
-          result[1]
-        )
+        !Array.isArray(result) ||
+        !Array.isArray(result[1])
       ) {
         break;
       }
 
       cursor =
-        String(
-          result[0]
-        );
+        String(result[0]);
 
       keys.push(
         ...result[1]
@@ -885,7 +1043,6 @@ async function scanAllDraftKeys(
       cursor !== "0"
     );
 
-    // Remove duplicate keys.
     return {
       keys:
         [...new Set(keys)]
@@ -894,11 +1051,33 @@ async function scanAllDraftKeys(
   } catch (error) {
     return {
       keys,
+
       error:
         error?.message ||
         "Redis SCAN failed."
     };
   }
+}
+
+
+// ==========================================
+// Draft time helper
+// ==========================================
+
+function getDraftTime(draft) {
+  const created =
+    draft?.created_at;
+
+  if (!created) {
+    return 0;
+  }
+
+  const time =
+    new Date(created).getTime();
+
+  return Number.isFinite(time)
+    ? time
+    : 0;
 }
 
 
@@ -919,10 +1098,8 @@ function sanitizeUrl(value) {
       new URL(url);
 
     if (
-      parsed.protocol !==
-        "https:" &&
-      parsed.protocol !==
-        "http:"
+      parsed.protocol !== "https:" &&
+      parsed.protocol !== "http:"
     ) {
       return "";
     }
@@ -1026,6 +1203,7 @@ async function redisCommand(
     if (!response.ok) {
       return {
         result: null,
+
         error:
           text.slice(
             0,
@@ -1042,6 +1220,7 @@ async function redisCommand(
     } catch {
       return {
         result: null,
+
         error:
           "Invalid Redis response."
       };
@@ -1060,6 +1239,7 @@ async function redisCommand(
   } catch (error) {
     return {
       result: null,
+
       error:
         error?.message ||
         "Redis request failed."
@@ -1080,4 +1260,4 @@ function sleep(ms) {
         ms
       )
   );
-    }
+          }
