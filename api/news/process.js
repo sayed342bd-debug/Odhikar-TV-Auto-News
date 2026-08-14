@@ -17,16 +17,6 @@ export default async function handler(req, res) {
     });
   }
 
-  const allowedCategories = [
-    "জাতীয়",
-    "আন্তর্জাতিক",
-    "খেলাধুলা",
-    "বিনোদন",
-    "প্রযুক্তি",
-    "অর্থনীতি",
-    "অন্যান্য"
-  ];
-
   try {
     // ==========================================
     // 1. Fetch latest news
@@ -45,7 +35,7 @@ export default async function handler(req, res) {
 
     const newsData = await newsResponse.json();
 
-    if (!newsData.news || newsData.news.length === 0) {
+    if (!Array.isArray(newsData.news) || newsData.news.length === 0) {
       return res.status(200).json({
         success: true,
         message: "No news found.",
@@ -61,17 +51,21 @@ export default async function handler(req, res) {
     // ==========================================
 
     for (const news of newsData.news.slice(0, 5)) {
-      if (!news.title || !news.title.trim()) {
+      if (!news || !news.title || !news.link) {
         results.push({
-          title: "Unknown",
           status: "invalid_source_news"
         });
 
         continue;
       }
 
+      const title = String(news.title).trim();
+
       const duplicateKey =
-        "news:processed:" + hashString(news.title.trim());
+        "news:processed:" + hashString(title);
+
+      const articleKey =
+        "news:draft:" + hashString(title);
 
       // ==========================================
       // 3. Duplicate check
@@ -83,9 +77,19 @@ export default async function handler(req, res) {
         ["GET", duplicateKey]
       );
 
+      if (checkResponse.error) {
+        results.push({
+          title,
+          status: "redis_error",
+          error: checkResponse.error
+        });
+
+        continue;
+      }
+
       if (checkResponse.result) {
         results.push({
-          title: news.title,
+          title,
           status: "duplicate"
         });
 
@@ -93,28 +97,45 @@ export default async function handler(req, res) {
       }
 
       // ==========================================
-      // 4. Gemini prompt
+      // 4. Check whether draft already exists
+      // ==========================================
+
+      const existingDraft = await redisCommand(
+        redisUrl,
+        redisToken,
+        ["GET", articleKey]
+      );
+
+      if (existingDraft.result) {
+        results.push({
+          title,
+          status: "draft_already_exists",
+          draft_key: articleKey
+        });
+
+        continue;
+      }
+
+      // ==========================================
+      // 5. Gemini prompt
       // ==========================================
 
       const prompt = `
-তুমি ODHIKAR TV-এর একজন দায়িত্বশীল News Editor এবং Safety Reviewer।
+তুমি ODHIKAR TV-এর News Editor।
 
-নিচের সংবাদ তথ্যের ভিত্তিতে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত বাংলা নিউজ তৈরি করো।
+নিচের সংবাদ তথ্যের ভিত্তিতে সম্পূর্ণ নতুন ভাষায় একটি সংক্ষিপ্ত ও নিরপেক্ষ বাংলা নিউজ তৈরি করো।
 
 গুরুত্বপূর্ণ নিয়ম:
-
-1. কোনো তথ্য বানাবে না।
-2. মূল প্রতিবেদনের বাক্য হুবহু কপি করবে না।
-3. শুধুমাত্র দেওয়া তথ্যের ভিত্তিতে লিখবে।
-4. অভিযোগকে প্রমাণিত সত্য হিসেবে লিখবে না।
-5. নিশ্চিত নয় এমন তথ্যকে নিশ্চিত হিসেবে লিখবে না।
-6. অতিরঞ্জিত বা ক্লিকবেইট শিরোনাম লিখবে না।
-7. নিরপেক্ষ ও পেশাদার ভাষা ব্যবহার করবে।
-8. কোনো গুরুত্বপূর্ণ তথ্য না থাকলে অনুমান করে পূরণ করবে না।
-9. রাজনৈতিক, অপরাধ, সহিংসতা, সংঘাত বা বিতর্কিত বিষয়ে বিশেষভাবে সতর্ক থাকবে।
-10. কোনো দাবি যদি নিশ্চিতভাবে যাচাই করা সম্ভব না হয়, তাহলে safety_status হবে "review"।
-11. সংবাদটি স্বাভাবিক ও প্রকাশযোগ্য হলে safety_status হবে "safe"।
-12. সন্দেহ থাকলে "safe" না দিয়ে "review" নির্বাচন করবে।
+- কোনো তথ্য বানাবে না।
+- মূল প্রতিবেদনের বাক্য হুবহু কপি করবে না।
+- শুধুমাত্র দেওয়া তথ্যের ভিত্তিতে লিখবে।
+- অভিযোগকে প্রমাণিত সত্য হিসেবে লিখবে না।
+- নিশ্চিত নয় এমন তথ্যকে নিশ্চিত হিসেবে লিখবে না।
+- রাজনৈতিক বা বিতর্কিত বিষয়ে নিরপেক্ষ ভাষা ব্যবহার করবে।
+- অতিরঞ্জিত, উত্তেজক বা ক্লিকবেইট শিরোনাম লিখবে না।
+- কোনো ব্যক্তি বা প্রতিষ্ঠানের বিরুদ্ধে নতুন অভিযোগ তৈরি করবে না।
+- উৎসে যা বলা হয়নি তা যোগ করবে না।
+- সংক্ষিপ্ত কিন্তু তথ্যপূর্ণ সংবাদ লিখবে।
 
 Category অবশ্যই নিচের একটি হতে হবে:
 
@@ -126,110 +147,104 @@ Category অবশ্যই নিচের একটি হতে হবে:
 অর্থনীতি
 অন্যান্য
 
-শুধু JSON object ফেরত দাও।
+শুধু JSON format-এ উত্তর দাও।
 
-JSON format:
-
+JSON structure:
 {
   "title": "নতুন বাংলা শিরোনাম",
-  "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
-  "category": "জাতীয়",
-  "safety_status": "safe",
-  "safety_reason": ""
+  "summary": "সংক্ষিপ্ত বাংলা সংবাদ",
+  "category": "জাতীয়"
 }
-
-যদি সংবাদটি সরাসরি প্রকাশের জন্য নিরাপদ না হয়:
-
-{
-  "title": "নতুন বাংলা শিরোনাম",
-  "summary": "সংক্ষিপ্ত সংবাদ বিবরণ",
-  "category": "জাতীয়",
-  "safety_status": "review",
-  "safety_reason": "কেন মানব যাচাই প্রয়োজন তার সংক্ষিপ্ত কারণ"
-}
-
-safety_status অবশ্যই "safe" অথবা "review" হবে।
 
 মূল খবর:
-Title: ${news.title}
-Source: ${news.source || "Unknown"}
-Published: ${news.pubDate || "Unknown"}
-Source URL: ${news.link || ""}
+
+Title: ${title}
+Source: ${String(news.source || "অজানা").trim()}
+Published: ${String(news.pubDate || "").trim()}
+Source URL: ${String(news.link).trim()}
 `;
 
       // ==========================================
-      // 5. Gemini Interactions API
+      // 6. Gemini API request
       // ==========================================
 
-      const geminiResponse = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/interactions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": geminiKey
-          },
-          body: JSON.stringify({
-            model: "gemini-flash-lite-latest",
-            input: prompt,
-            response_format: {
-              type: "text",
-              mime_type: "application/json",
-              schema: {
-                type: "object",
-                properties: {
-                  title: {
-                    type: "string"
+      let geminiResponse;
+
+      try {
+        geminiResponse = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/interactions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": geminiKey
+            },
+            body: JSON.stringify({
+              model: "gemini-flash-lite-latest",
+              input: prompt,
+              response_format: {
+                type: "text",
+                mime_type: "application/json",
+                schema: {
+                  type: "object",
+                  properties: {
+                    title: {
+                      type: "string"
+                    },
+                    summary: {
+                      type: "string"
+                    },
+                    category: {
+                      type: "string",
+                      enum: [
+                        "জাতীয়",
+                        "আন্তর্জাতিক",
+                        "খেলাধুলা",
+                        "বিনোদন",
+                        "প্রযুক্তি",
+                        "অর্থনীতি",
+                        "অন্যান্য"
+                      ]
+                    }
                   },
-                  summary: {
-                    type: "string"
-                  },
-                  category: {
-                    type: "string",
-                    enum: allowedCategories
-                  },
-                  safety_status: {
-                    type: "string",
-                    enum: [
-                      "safe",
-                      "review"
-                    ]
-                  },
-                  safety_reason: {
-                    type: "string"
-                  }
-                },
-                required: [
-                  "title",
-                  "summary",
-                  "category",
-                  "safety_status",
-                  "safety_reason"
-                ]
+                  required: [
+                    "title",
+                    "summary",
+                    "category"
+                  ]
+                }
               }
-            }
-          })
-        }
-      );
+            })
+          }
+        );
+      } catch (error) {
+        results.push({
+          title,
+          status: "ai_connection_error",
+          error: error.message
+        });
+
+        continue;
+      }
 
       const geminiText = await geminiResponse.text();
 
       // ==========================================
-      // 6. Gemini API error
+      // 7. Gemini API error
       // ==========================================
 
       if (!geminiResponse.ok) {
         results.push({
-          title: news.title,
+          title,
           status: "ai_error",
-          error: geminiText
+          error: geminiText.slice(0, 1000)
         });
 
         continue;
       }
 
       // ==========================================
-      // 7. Parse Gemini response
+      // 8. Parse Gemini response
       // ==========================================
 
       let geminiData;
@@ -238,19 +253,21 @@ Source URL: ${news.link || ""}
         geminiData = JSON.parse(geminiText);
       } catch {
         results.push({
-          title: news.title,
-          status: "invalid_gemini_response"
+          title,
+          status: "invalid_gemini_response",
+          response: geminiText.slice(0, 1000)
         });
 
         continue;
       }
 
       // ==========================================
-      // 8. Extract generated text
+      // 9. Extract generated text
       // ==========================================
 
       let generatedText = "";
 
+      // output_text
       if (
         typeof geminiData.output_text === "string" &&
         geminiData.output_text.trim()
@@ -258,31 +275,30 @@ Source URL: ${news.link || ""}
         generatedText = geminiData.output_text.trim();
       }
 
+      // outputs
       if (!generatedText && Array.isArray(geminiData.outputs)) {
         for (const output of geminiData.outputs) {
           if (
-            output?.type === "text" &&
-            typeof output?.text === "string"
+            output &&
+            typeof output.text === "string" &&
+            output.text.trim()
           ) {
             generatedText += output.text;
           }
         }
       }
 
+      // steps
       if (!generatedText && Array.isArray(geminiData.steps)) {
         for (const step of geminiData.steps) {
-          if (step?.type !== "model_output") {
-            continue;
-          }
-
-          if (!Array.isArray(step.content)) {
+          if (!Array.isArray(step?.content)) {
             continue;
           }
 
           for (const content of step.content) {
             if (
-              content?.type === "text" &&
-              typeof content?.text === "string"
+              typeof content?.text === "string" &&
+              content.text.trim()
             ) {
               generatedText += content.text;
             }
@@ -290,19 +306,19 @@ Source URL: ${news.link || ""}
         }
       }
 
-      generatedText = generatedText.trim();
-
-      if (!generatedText) {
+      if (!generatedText.trim()) {
         results.push({
-          title: news.title,
+          title,
           status: "empty_ai_response"
         });
 
         continue;
       }
 
+      generatedText = cleanJsonText(generatedText);
+
       // ==========================================
-      // 9. Parse generated article JSON
+      // 10. Parse generated JSON
       // ==========================================
 
       let article;
@@ -311,166 +327,134 @@ Source URL: ${news.link || ""}
         article = JSON.parse(generatedText);
       } catch {
         results.push({
-          title: news.title,
-          status: "invalid_ai_json"
+          title,
+          status: "invalid_ai_json",
+          response: generatedText.slice(0, 1500)
         });
 
         continue;
       }
 
       // ==========================================
-      // 10. Basic article validation
+      // 11. Validate article structure
       // ==========================================
 
       if (
-        typeof article !== "object" ||
         !article ||
+        typeof article !== "object" ||
         typeof article.title !== "string" ||
-        !article.title.trim() ||
         typeof article.summary !== "string" ||
-        !article.summary.trim() ||
-        typeof article.category !== "string" ||
-        !article.category.trim() ||
-        typeof article.safety_status !== "string"
+        typeof article.category !== "string"
       ) {
         results.push({
-          title: news.title,
-          status: "safety_review_required"
+          title,
+          status: "safety_review_required",
+          reason: "AI output structure is invalid."
         });
 
         continue;
       }
 
-      // ==========================================
-      // 11. Validate category
-      // ==========================================
-
-      if (!allowedCategories.includes(article.category)) {
-        results.push({
-          title: news.title,
-          status: "invalid_category",
-          category: article.category
-        });
-
-        continue;
-      }
-
-      // ==========================================
-      // 12. Validate safety status
-      // ==========================================
+      const generatedTitle = article.title.trim();
+      const generatedSummary = article.summary.trim();
+      const generatedCategory = article.category.trim();
 
       if (
-        article.safety_status !== "safe" &&
-        article.safety_status !== "review"
+        !generatedTitle ||
+        !generatedSummary ||
+        !generatedCategory
       ) {
         results.push({
-          title: news.title,
-          status: "invalid_safety_status"
+          title,
+          status: "safety_review_required",
+          reason: "Required AI fields are empty."
         });
 
         continue;
       }
 
       // ==========================================
-      // 13. Extra local safety checks
+      // 12. Validate category
       // ==========================================
 
-      const localSafety = runLocalSafetyChecks(
-        article.title,
-        article.summary
+      const allowedCategories = [
+        "জাতীয়",
+        "আন্তর্জাতিক",
+        "খেলাধুলা",
+        "বিনোদন",
+        "প্রযুক্তি",
+        "অর্থনীতি",
+        "অন্যান্য"
+      ];
+
+      if (!allowedCategories.includes(generatedCategory)) {
+        results.push({
+          title,
+          status: "invalid_category",
+          category: generatedCategory
+        });
+
+        continue;
+      }
+
+      // ==========================================
+      // 13. Basic safety review
+      // ==========================================
+
+      const suspiciousPatterns = [
+        "নিশ্চিতভাবেই",
+        "অবশ্যই সত্য",
+        "প্রমাণিত যে",
+        "শতভাগ নিশ্চিত",
+        "চাঞ্চল্যকর!",
+        "অবাক করা!",
+        "ভয়াবহ!",
+        "ভাইরাল!"
+      ];
+
+      const combinedText =
+        `${generatedTitle} ${generatedSummary}`;
+
+      const suspicious = suspiciousPatterns.some((pattern) =>
+        combinedText.includes(pattern)
       );
 
-      if (!localSafety.safe) {
-        article.safety_status = "review";
-
-        if (!article.safety_reason) {
-          article.safety_reason = localSafety.reason;
-        } else {
-          article.safety_reason =
-            `${article.safety_reason}; ${localSafety.reason}`;
-        }
-      }
-
-      // ==========================================
-      // 14. Create common article data
-      // ==========================================
-
-      const now = new Date().toISOString();
-
-      const baseArticle = {
-        title: article.title.trim(),
-        summary: article.summary.trim(),
-        category: article.category,
-        source: news.source || "সংবাদ সূত্র",
-        source_url: news.link || "",
-        published_at: news.pubDate || "",
-        created_at: now,
-        safety_reason: article.safety_reason || ""
-      };
-
-      // ==========================================
-      // 15. REVIEW NEWS
-      // ==========================================
-
-      if (article.safety_status === "review") {
-        const reviewKey =
-          "news:review:" + hashString(news.title.trim());
-
-        const review = {
-          ...baseArticle,
-          status: "review",
-          original_title: news.title
-        };
-
-        await redisCommand(
-          redisUrl,
-          redisToken,
-          [
-            "SET",
-            reviewKey,
-            JSON.stringify(review),
-            "EX",
-            "2592000"
-          ]
-        );
-
-        // Mark processed so Cron does not repeatedly
-        // create the same review item.
-        await redisCommand(
-          redisUrl,
-          redisToken,
-          [
-            "SET",
-            duplicateKey,
-            "1",
-            "EX",
-            "2592000"
-          ]
-        );
-
+      if (suspicious) {
         results.push({
-          title: news.title,
-          status: "review",
-          reason: review.safety_reason,
-          review_key: reviewKey
+          title,
+          status: "safety_review_required",
+          reason: "Potentially sensational or unverified wording detected."
         });
 
         continue;
       }
 
       // ==========================================
-      // 16. SAFE NEWS → CREATE DRAFT
+      // 14. Create draft
       // ==========================================
 
-      const articleKey =
-        "news:draft:" + hashString(news.title.trim());
-
       const draft = {
-        ...baseArticle,
-        status: "draft"
+        title: generatedTitle,
+        summary: generatedSummary,
+        category: generatedCategory,
+
+        source: String(news.source || "সংবাদ সূত্র").trim(),
+
+        source_url: String(news.link).trim(),
+
+        published_at:
+          String(news.pubDate || "").trim(),
+
+        status: "draft",
+
+        created_at:
+          new Date().toISOString()
       };
 
-      // Save draft first.
+      // ==========================================
+      // 15. Save draft to Redis
+      // ==========================================
+
       const saveResponse = await redisCommand(
         redisUrl,
         redisToken,
@@ -483,18 +467,21 @@ Source URL: ${news.link || ""}
         ]
       );
 
-      if (!saveResponse.success) {
+      if (saveResponse.error) {
         results.push({
-          title: news.title,
-          status: "draft_save_failed"
+          title,
+          status: "draft_save_error",
+          error: saveResponse.error
         });
 
         continue;
       }
 
-      // Only mark as processed after the draft
-      // was successfully saved.
-      await redisCommand(
+      // ==========================================
+      // 16. Mark as processed
+      // ==========================================
+
+      const markResponse = await redisCommand(
         redisUrl,
         redisToken,
         [
@@ -506,27 +493,41 @@ Source URL: ${news.link || ""}
         ]
       );
 
+      if (markResponse.error) {
+        results.push({
+          title,
+          status: "draft_created_but_duplicate_mark_failed",
+          draft_key: articleKey,
+          error: markResponse.error
+        });
+
+        continue;
+      }
+
+      // ==========================================
+      // 17. Success
+      // ==========================================
+
       results.push({
-        title: news.title,
+        title,
         status: "draft_created",
-        category: article.category,
+        category: generatedCategory,
         draft_key: articleKey
       });
     }
 
-    // ==========================================
-    // 17. Final response
-    // ==========================================
-
     return res.status(200).json({
       success: true,
-      message: "Gemini news processing completed with safety filter.",
+      message: "Gemini news processing completed.",
       processed: results.length,
-      safe_drafts: results.filter(
+      draft_created: results.filter(
         item => item.status === "draft_created"
       ).length,
-      review_required: results.filter(
-        item => item.status === "review"
+      duplicates: results.filter(
+        item => item.status === "duplicate"
+      ).length,
+      safety_reviews: results.filter(
+        item => item.status === "safety_review_required"
       ).length,
       results
     });
@@ -542,84 +543,83 @@ Source URL: ${news.link || ""}
 
 
 // ==========================================
-// Local safety checks
-// ==========================================
-
-function runLocalSafetyChecks(title, summary) {
-  const text =
-    `${title || ""} ${summary || ""}`.toLowerCase();
-
-  // Extremely short content is not suitable
-  // for automatic publishing.
-  if (
-    String(title || "").trim().length < 10 ||
-    String(summary || "").trim().length < 30
-  ) {
-    return {
-      safe: false,
-      reason: "সংবাদের তথ্য অসম্পূর্ণ বা খুব সংক্ষিপ্ত।"
-    };
-  }
-
-  // Clickbait / sensational wording.
-  const suspiciousPatterns = [
-    "চাঞ্চল্যকর",
-    "ভয়াবহ গোপন",
-    "অবিশ্বাস্য",
-    "হাড়হিম",
-    "দেখুন কী হলো",
-    "সবাই হতবাক",
-    "ভাইরাল সত্য",
-    "নিশ্চিতভাবেই"
-  ];
-
-  for (const pattern of suspiciousPatterns) {
-    if (text.includes(pattern)) {
-      return {
-        safe: false,
-        reason:
-          "শিরোনাম বা বিবরণে অতিরঞ্জিত/ক্লিকবেইট ভাষা পাওয়া গেছে।"
-      };
-    }
-  }
-
-  return {
-    safe: true,
-    reason: ""
-  };
-}
-
-
-// ==========================================
 // Upstash Redis REST command helper
 // ==========================================
 
 async function redisCommand(url, token, command) {
-  const response = await fetch(
-    `${url}/pipeline`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify([command])
-    }
-  );
+  try {
+    const response = await fetch(
+      `${url}/pipeline`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify([command])
+      }
+    );
 
-  if (!response.ok) {
+    const text = await response.text();
+
+    if (!response.ok) {
+      return {
+        result: null,
+        error: text.slice(0, 1000)
+      };
+    }
+
+    let data;
+
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return {
+        result: null,
+        error: "Invalid Redis response."
+      };
+    }
+
     return {
-      success: false,
-      result: null
+      result: data[0]?.result ?? null,
+      error: data[0]?.error || null
+    };
+
+  } catch (error) {
+    return {
+      result: null,
+      error: error.message
     };
   }
+}
 
-  const data = await response.json();
 
-  return {
-    success: true,
-    result: data[0]?.result
-  };
+// ==========================================
+// Clean JSON returned by AI
+// ==========================================
+
+function cleanJsonText(text) {
+  let cleaned = String(text).trim();
+
+  // Remove Markdown code fences
+  cleaned = cleaned
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  // Find first JSON object
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+
+  if (firstBrace !== -1 && lastBrace !== -1) {
+    cleaned = cleaned.slice(
+      firstBrace,
+      lastBrace + 1
+    );
+  }
+
+  return cleaned.trim();
 }
 
 
@@ -630,14 +630,16 @@ async function redisCommand(url, token, command) {
 function hashString(text) {
   let hash = 0;
 
-  for (let i = 0; i < text.length; i++) {
+  const value = String(text || "").trim();
+
+  for (let i = 0; i < value.length; i++) {
     hash =
       (hash << 5) -
       hash +
-      text.charCodeAt(i);
+      value.charCodeAt(i);
 
     hash |= 0;
   }
 
   return Math.abs(hash).toString();
-            }
+}
