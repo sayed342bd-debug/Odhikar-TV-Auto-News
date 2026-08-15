@@ -2,7 +2,7 @@ export default async function handler(req, res) {
   // ==========================================
   // 1. Allow only GET
   // ==========================================
-
+  
   if (req.method !== "GET") {
     return res.status(405).json({
       success: false,
